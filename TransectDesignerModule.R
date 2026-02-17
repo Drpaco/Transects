@@ -19,28 +19,25 @@ make_transects_ll <- function(anchor_lonlat, n = 10, len_km = 20, sp_km = 2,
   utm <- utm_epsg_from_lonlat(lon, lat)
   
   # Anchor point as sf
-  anchor_pt_ll <- st_as_sf(data.frame(lon = lon, lat = lat), coords = c("lon","lat"), crs = 4326)
-  anchor_pt_utm <- st_transform(anchor_pt_ll, utm)
+  anchor_pt_ll  <- sf::st_as_sf(data.frame(lon = lon, lat = lat), coords = c("lon","lat"), crs = 4326)
+  anchor_pt_utm <- sf::st_transform(anchor_pt_ll, utm)
   
-  # Direction unit vectors in UTM for given bearing
-  # Bearing: 0 = North, 90 = East
+  # Direction unit vectors in UTM for given bearing (0 = North, 90 = East)
   theta <- brg_deg * pi / 180
-  dx <- sin(theta)
-  dy <- cos(theta)
+  dx <- sin(theta); dy <- cos(theta)
   
   # Perpendicular vector (to the left)
-  pdx <- -dy
-  pdy <- dx
+  pdx <- -dy; pdy <- dx
   
   L <- len_km * 1000
-  S <- sp_km * 1000
+  S <- sp_km  * 1000
   
   # Center the stack around the anchor (so anchor is middle line)
   # offsets = ..., -2S, -S, 0, S, 2S, ...
   offsets <- ((seq_len(n) - (n + 1)/2) * S)
   
   # Create lines in UTM
-  axy <- st_coordinates(anchor_pt_utm)[1, ]
+  axy   <- sf::st_coordinates(anchor_pt_utm)[1, ]
   lines <- lapply(seq_len(n), function(i) {
     off <- offsets[i]
     x0 <- axy["X"] + off * pdx
@@ -52,76 +49,72 @@ make_transects_ll <- function(anchor_lonlat, n = 10, len_km = 20, sp_km = 2,
     x2 <- x0 + (L/2) * dx
     y2 <- y0 + (L/2) * dy
     
-    st_linestring(matrix(c(x1,y1,x2,y2), ncol = 2, byrow = TRUE))
+    sf::st_linestring(matrix(c(x1,y1,x2,y2), ncol = 2, byrow = TRUE))
   })
   
-  tran_utm <- st_sf(
+  tran_utm <- sf::st_sf(
     id = seq_len(n),
-    geometry = st_sfc(lines, crs = utm)
+    geometry = sf::st_sfc(lines, crs = utm)
   )
   
   # Optionally clip to bbox (bbox_ll in EPSG:4326)
   if (clip_to_bbox && !is.null(bbox_ll)) {
-    bbox_poly_ll <- st_as_sfc(validate_bbox(bbox_ll)) |> st_set_crs(4326)
-    bbox_poly_utm <- st_transform(bbox_poly_ll, utm)
-    tran_utm <- st_intersection(tran_utm, bbox_poly_utm)
+    bbox_poly_ll  <- sf::st_as_sfc(validate_bbox(bbox_ll)) |> sf::st_set_crs(4326)
+    bbox_poly_utm <- sf::st_transform(bbox_poly_ll, utm)
+    tran_utm      <- sf::st_intersection(tran_utm, bbox_poly_utm)
   }
   
-  st_transform(tran_utm, 4326)
+  sf::st_transform(tran_utm, 4326)
 }
 
 # Plot preview: full terre context, bbox outline, and transects
 plot_transect_preview <- function(bb_ll, terre, pt_landmark_ll, tran_ll,
                                   air_sf = NULL, muni_sf = NULL,
                                   show_full_terre = TRUE) {
-  
   bb_ll <- validate_bbox(bb_ll)
   
-  # Force numeric bbox limits (prevents ggplot from ignoring them)
+  # Force numeric bbox limits
   xlim <- c(as.numeric(bb_ll[["xmin"]]), as.numeric(bb_ll[["xmax"]]))
   ylim <- c(as.numeric(bb_ll[["ymin"]]), as.numeric(bb_ll[["ymax"]]))
   
   # bbox polygon overlay
-  bb_poly <- st_as_sfc(bb_ll) |> st_set_crs(4326)
+  bb_poly <- sf::st_as_sfc(bb_ll) |> sf::st_set_crs(4326)
   
   # transform layers to lon/lat for consistent preview
-  terre_ll <- st_transform(terre, 4326)
-  tran_ll  <- st_transform(tran_ll, 4326)
+  terre_ll <- sf::st_transform(terre, 4326)
+  tran_ll  <- sf::st_transform(tran_ll,  4326)
   
   # draw only cropped terre for speed OR full terre if requested
-  terre_draw <- if (show_full_terre) terre_ll else st_crop(terre_ll, st_bbox(bb_poly))
+  terre_draw <- if (show_full_terre) terre_ll else sf::st_crop(terre_ll, sf::st_bbox(bb_poly))
   
-  p <- ggplot() +
-    geom_sf(data = terre_draw, fill = "grey97", color = "grey85", linewidth = 0.15) +
-    geom_sf(data = st_sf(geometry = bb_poly), fill = NA, color = "magenta", linewidth = 1) +
-    geom_sf(data = tran_ll, color = "red", linewidth = 1) +
-    geom_sf_text(data = tran_ll, aes(label = id), color = "red4", size = 3,
-                 check_overlap = TRUE, show.legend = FALSE) +
-    { if (!is.null(pt_landmark_ll)) geom_sf(data = st_transform(pt_landmark_ll, 4326),
-                                            color = "blue", size = 3) } +
+  p <- ggplot2::ggplot() +
+    ggplot2::geom_sf(data = terre_draw, fill = "grey97", color = "grey85", linewidth = 0.15) +
+    ggplot2::geom_sf(data = sf::st_sf(geometry = bb_poly), fill = NA, color = "magenta", linewidth = 1) +
+    ggplot2::geom_sf(data = tran_ll, color = "red", linewidth = 1) +
+    ggplot2::geom_sf_text(data = tran_ll, ggplot2::aes(label = id), color = "red4", size = 3,
+                          check_overlap = TRUE, show.legend = FALSE) +
+    { if (!is.null(pt_landmark_ll)) ggplot2::geom_sf(data = sf::st_transform(pt_landmark_ll, 4326),
+                                                     color = "blue", size = 3) } +
     # Optional overlays (points)
-    { if (!is.null(air_sf) && nrow(air_sf) > 0)
-      geom_sf(data = st_transform(air_sf, 4326), color = "blue", size = 1.1) } +
-    { if (!is.null(muni_sf) && nrow(muni_sf) > 0)
-      geom_sf(data = st_transform(muni_sf, 4326), color = "red", size = 1.1) } +
-    # IMPORTANT: force bbox view and CRS
-    coord_sf(crs = st_crs(4326), xlim = xlim, ylim = ylim, expand = FALSE) +
-    theme_minimal() +
-    labs(title = sprintf("Transect preview — BBox: xmin=%.4f ymin=%.4f xmax=%.4f ymax=%.4f",
-                         xlim[1], ylim[1], xlim[2], ylim[2]))
+    { if (!is.null(air_sf)  && nrow(air_sf)  > 0) ggplot2::geom_sf(data = sf::st_transform(air_sf,  4326),
+                                                                   color = "blue", size = 1.1) } +
+    { if (!is.null(muni_sf) && nrow(muni_sf) > 0) ggplot2::geom_sf(data = sf::st_transform(muni_sf, 4326),
+                                                                   color = "red",  size = 1.1) } +
+    ggplot2::coord_sf(crs = sf::st_crs(4326), xlim = xlim, ylim = ylim, expand = FALSE) +
+    ggplot2::theme_minimal() +
+    ggplot2::labs(title = sprintf("Transect preview — BBox: xmin=%.4f ymin=%.4f xmax=%.4f ymax=%.4f",
+                                  xlim[1], ylim[1], xlim[2], ylim[2]))
   
   print(p)
 }
 
 # Interactive editor for transects
-
 refine_transects <- function(bb_ll, terre, pt_landmark_ll,
                              air_sf = NULL, muni_sf = NULL,
                              n = 10, len_km = 20, sp_km = 2, brg_deg = 90,
                              anchor_lonlat = NULL,
                              clip_to_bbox = TRUE,
                              show_full_terre = TRUE) {
-  
   
   bb_ll <- validate_bbox(bb_ll)
   
@@ -147,17 +140,16 @@ refine_transects <- function(bb_ll, terre, pt_landmark_ll,
     cat("  sp <km>                    -> spacing in km (e.g., sp 1.5)\n")
     cat("  brg <deg>                  -> bearing degrees (0=N,90=E) (e.g., brg 45)\n")
     cat("  anchor <lon> <lat>         -> set anchor (e.g., anchor -64.2 48.8)\n")
-    cat("  move <dir> [km]            -> move anchor (dir = n/s/e/w or north/south/east/west)\n")
-    cat("                               e.g., move east 20\n")
+    cat("  move <dir> [km]            -> move anchor (n/s/e/w or north/south/east/west)\n")
+    cat("                                 e.g., move east 20\n")
     cat("  clip on|off                -> clip transects to bbox\n\n")
     
     plot_transect_preview(bb_ll, terre, pt_landmark_ll, tran_ll,
                           air_sf = air_sf, muni_sf = muni_sf,
                           show_full_terre = show_full_terre)
     
-    ans <- trimws(get_input_safe("Transect choice: ", "ok"))
+    ans  <- trimws(get_input_safe("Transect choice: ", "ok"))
     ans2 <- tolower(ans)
-    
     if (ans2 == "ok") return(tran_ll)
     
     # split command tokens
@@ -166,7 +158,6 @@ refine_transects <- function(bb_ll, terre, pt_landmark_ll,
     # ---- COMMAND NORMALIZATION ----
     # Allow: move <dir> [km], where dir can be n/s/e/w or north/south/east/west
     if (length(tok) >= 2 && tok[1] == "move") {
-      
       dir <- tolower(tok[2])
       
       # normalize long directions
@@ -179,12 +170,11 @@ refine_transects <- function(bb_ll, terre, pt_landmark_ll,
       if (!is.finite(step_km) || step_km <= 0) step_km <- sp_km
       
       if (dir %in% c("n","s","e","w")) {
-        utm <- utm_epsg_from_lonlat(anchor_lonlat[1], anchor_lonlat[2])
-        
-        pt0  <- st_as_sf(data.frame(lon=anchor_lonlat[1], lat=anchor_lonlat[2]),
-                         coords=c("lon","lat"), crs=4326)
-        pt0m <- st_transform(pt0, utm)
-        xy   <- st_coordinates(pt0m)[1,]
+        utm  <- utm_epsg_from_lonlat(anchor_lonlat[1], anchor_lonlat[2])
+        pt0  <- sf::st_as_sf(data.frame(lon=anchor_lonlat[1], lat=anchor_lonlat[2]),
+                             coords=c("lon","lat"), crs=4326)
+        pt0m <- sf::st_transform(pt0, utm)
+        xy   <- sf::st_coordinates(pt0m)[1,]
         
         dx <- 0; dy <- 0
         if (dir == "n") dy <-  step_km * 1000
@@ -192,10 +182,10 @@ refine_transects <- function(bb_ll, terre, pt_landmark_ll,
         if (dir == "e") dx <-  step_km * 1000
         if (dir == "w") dx <- -step_km * 1000
         
-        pt1m <- st_as_sf(data.frame(x = xy["X"] + dx, y = xy["Y"] + dy),
-                         coords=c("x","y"), crs=utm)
-        pt1  <- st_transform(pt1m, 4326)
-        ll   <- st_coordinates(pt1)[1,]
+        pt1m <- sf::st_as_sf(data.frame(x = xy["X"] + dx, y = xy["Y"] + dy),
+                             coords=c("x","y"), crs=utm)
+        pt1  <- sf::st_transform(pt1m, 4326)
+        ll   <- sf::st_coordinates(pt1)[1,]
         anchor_lonlat <- c(ll["X"], ll["Y"])
         
         cat(sprintf("Moved anchor %s by %.2f km -> lon/lat = %.5f, %.5f\n",
@@ -237,7 +227,7 @@ refine_transects <- function(bb_ll, terre, pt_landmark_ll,
     
     # clip toggle
     if (length(tok) >= 2 && tok[1] == "clip") {
-      if (tok[2] %in% c("on","true","1")) clip_to_bbox <- TRUE
+      if (tok[2] %in% c("on","true","1"))  clip_to_bbox <- TRUE
       if (tok[2] %in% c("off","false","0")) clip_to_bbox <- FALSE
       next
     }
@@ -248,21 +238,20 @@ refine_transects <- function(bb_ll, terre, pt_landmark_ll,
       step_km <- if (length(tok) >= 2) suppressWarnings(as.numeric(tok[2])) else sp_km
       if (!is.finite(step_km) || step_km <= 0) step_km <- sp_km
       
-      # move anchor in UTM meters then convert back to lon/lat
-      utm <- utm_epsg_from_lonlat(anchor_lonlat[1], anchor_lonlat[2])
-      pt0 <- st_as_sf(data.frame(lon=anchor_lonlat[1], lat=anchor_lonlat[2]),
-                      coords=c("lon","lat"), crs=4326)
-      pt0m <- st_transform(pt0, utm)
-      xy <- st_coordinates(pt0m)[1,]
+      utm  <- utm_epsg_from_lonlat(anchor_lonlat[1], anchor_lonlat[2])
+      pt0  <- sf::st_as_sf(data.frame(lon=anchor_lonlat[1], lat=anchor_lonlat[2]),
+                           coords=c("lon","lat"), crs=4326)
+      pt0m <- sf::st_transform(pt0, utm)
+      xy   <- sf::st_coordinates(pt0m)[1,]
       dx <- 0; dy <- 0
-      if (dir == "n") dy <- step_km*1000
+      if (dir == "n") dy <-  step_km*1000
       if (dir == "s") dy <- -step_km*1000
-      if (dir == "e") dx <- step_km*1000
+      if (dir == "e") dx <-  step_km*1000
       if (dir == "w") dx <- -step_km*1000
       
-      pt1m <- st_as_sf(data.frame(x = xy["X"] + dx, y = xy["Y"] + dy), coords=c("x","y"), crs=utm)
-      pt1 <- st_transform(pt1m, 4326)
-      ll <- st_coordinates(pt1)[1,]
+      pt1m <- sf::st_as_sf(data.frame(x = xy["X"] + dx, y = xy["Y"] + dy), coords=c("x","y"), crs=utm)
+      pt1  <- sf::st_transform(pt1m, 4326)
+      ll   <- sf::st_coordinates(pt1)[1,]
       anchor_lonlat <- c(ll["X"], ll["Y"])
       next
     }

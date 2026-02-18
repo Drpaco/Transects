@@ -8,7 +8,7 @@ library(ggplot2)
 # library(dplyr)
 
 # Example: full path to the .shp file
-shp_path <- "F:/U/TEMP/SHP/StudyArea2011.shp"
+shp_path <- "F:/U/Oiseaux souillés/Inventaires pélagiques/Golfe/Zones2/BaieChaleurs.shp"
 # On macOS/Linux it might look like:
 # shp_path <- "/Users/you/data/boundaries/municipal_boundaries.shp"
 

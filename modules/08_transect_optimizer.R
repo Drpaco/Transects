@@ -43,21 +43,58 @@ nearest_airport <- function(transects_sf, air_sf) {
   air_sf[idx, , drop = FALSE]
 }
 
+# Robust airport chooser: fast exact ident -> exact other fields -> partial -> nearest
 choose_airport <- function(air_sf, transects_sf, query = NULL) {
-  if (nrow(air_sf) == 0) {
+  if (!inherits(air_sf, "sf") || nrow(air_sf) == 0) {
     stop("No airports available. Pass an unfiltered airport layer (e.g., air_sf_all) to run_transect_optimizer.")
   }
-  if (!is.null(query) && nzchar(query)) {
-    cols <- intersect(names(air_sf), c("iata","icao","code","ident","name","label","airport","airport_label"))
-    if (length(cols) > 0) {
-      mask <- Reduce(`|`, lapply(cols, function(cn) {
-        grepl(query, as.character(air_sf[[cn]]), ignore.case = TRUE)
-      }))
-      cand <- air_sf[which(mask), , drop = FALSE]
-      if (nrow(cand) >= 1) return(cand[1, , drop = FALSE])
-    }
-    message("No airport matched '", query, "'. Falling back to nearest airport.")
+  # If user didn’t enter anything, go straight to nearest
+  if (is.null(query) || !nzchar(query)) return(nearest_airport(transects_sf, air_sf))
+  
+  # Normalize the query once
+  key <- toupper(trimws(as.character(query)))
+  key <- iconv(key, from = "", to = "ASCII//TRANSLIT")
+  key <- gsub("\\s+", "", key)
+  
+  norm_col <- function(x) {
+    v <- toupper(trimws(as.character(x)))
+    v <- iconv(v, from = "", to = "ASCII//TRANSLIT")
+    gsub("\\s+", "", v)
   }
+  
+  # ---- 0) FAST PATH: exact match on ident first (this is your ICAO in CA, e.g., CYGP) ----
+  if ("ident" %in% names(air_sf)) {
+    v <- norm_col(air_sf$ident)
+    hit <- which(v == key)
+    if (length(hit) > 0) return(air_sf[hit[1], , drop = FALSE])
+  }
+  
+  # ---- 1) exact match across other code fields ----
+  cols_priority_exact <- intersect(
+    c("icao_code","gps_code","icao","iata","iata_code","local_code","local","code"),
+    names(air_sf)
+  )
+  for (cn in cols_priority_exact) {
+    v <- norm_col(air_sf[[cn]])
+    hit <- which(v == key)
+    if (length(hit) > 0) return(air_sf[hit[1], , drop = FALSE])
+  }
+  
+  # ---- 2) partial match across common label/name fields ----
+  cols_partial <- intersect(
+    c("ident","icao_code","gps_code","icao","iata","iata_code","local_code","local","code","name","airport_label"),
+    names(air_sf)
+  )
+  if (length(cols_partial) > 0) {
+    mask <- Reduce(`|`, lapply(cols_partial, function(cn) {
+      vv <- toupper(trimws(as.character(air_sf[[cn]])))
+      grepl(key, vv, fixed = TRUE)
+    }))
+    cand <- air_sf[which(mask), , drop = FALSE]
+    if (nrow(cand) >= 1) return(cand[1, , drop = FALSE])
+  }
+  
+  message("No airport matched '", query, "'. Falling back to nearest airport.")
   nearest_airport(transects_sf, air_sf)
 }
 
@@ -258,32 +295,54 @@ build_manifest_with_airports <- function(lines_sf, plan, crs_m, speed_knots, tri
 
 # Prepare line endpoints and airports in a metric CRS; supports different arrival airport
 prep_lines <- function(lines_sf, airport_start_sf, crs_m, airport_end_sf = NULL) {
-  lines_sf     <- ensure_id(lines_sf)
-  lines_m      <- sf::st_transform(lines_sf,       crs_m)
-  airport_start<- sf::st_transform(airport_start_sf, crs_m)
-  airport_end  <- if (is.null(airport_end_sf)) airport_start else sf::st_transform(airport_end_sf, crs_m)
+  # 1) Project everything to a metric CRS for planning
+  stopifnot(inherits(lines_sf, "sf"))
+  lines_m       <- sf::st_transform(lines_sf,       crs_m)
+  airport_start <- sf::st_transform(airport_start_sf, crs_m)
+  airport_end   <- if (is.null(airport_end_sf)) airport_start else sf::st_transform(airport_end_sf, crs_m)
   
-  line_len <- as.numeric(sf::st_length(lines_m))
-  
-  cd <- as.data.frame(sf::st_coordinates(lines_m))
-  cd$vtx <- ave(cd$X, cd$L1, FUN = seq_along)
-  
-  n <- nrow(lines_m)
-  Ax <- Ay <- Bx <- By <- numeric(n)
-  for (k in 1:n) {
-    sub   <- cd[cd$L1 == k, ]
-    first <- sub[sub$vtx == 1, ]
-    last  <- sub[sub$vtx == max(sub$vtx), ]
-    Ax[k] <- first$X; Ay[k] <- first$Y
-    Bx[k] <- last$X;  By[k] <- last$Y
+  # 2) Normalize geometries:
+  #    - make valid
+  #    - explode MULTILINESTRING/collections into LINESTRING parts
+  #    - drop empties
+  lines_m <- sf::st_make_valid(lines_m)
+  lines_m <- suppressWarnings(sf::st_cast(lines_m, "LINESTRING"))
+  lines_m <- suppressWarnings(sf::st_collection_extract(lines_m, "LINESTRING"))
+  lines_m <- lines_m[!sf::st_is_empty(lines_m), , drop = FALSE]
+  if (nrow(lines_m) == 0) {
+    stop("No usable transect line coordinates found (degenerate geometries).")
   }
   
+  # 3) Drop ~0-length pieces (use >= 1 meter)
+  len_m <- as.numeric(sf::st_length(lines_m))
+  keep  <- is.finite(len_m) & (len_m >= 1)
+  lines_m <- lines_m[keep, , drop = FALSE]
+  len_m   <- len_m[keep]
+  if (nrow(lines_m) == 0) {
+    stop("No usable transect line coordinates found (degenerate geometries).")
+  }
+  
+  # 4) Give each retained piece its own id (we're planning per usable segment)
+  lines_m$id <- seq_len(nrow(lines_m))
+  
+  # 5) Extract endpoints A/B safely for each piece
+  Ax <- Ay <- Bx <- By <- numeric(nrow(lines_m))
+  for (i in seq_len(nrow(lines_m))) {
+    coords <- sf::st_coordinates(lines_m[i, ])
+    # For safety, if multiple parts slipped through, just take first/last row
+    first <- coords[1, c("X", "Y")]
+    last  <- coords[nrow(coords), c("X", "Y")]
+    Ax[i] <- first[["X"]]; Ay[i] <- first[["Y"]]
+    Bx[i] <- last[["X"]];  By[i] <- last[["Y"]]
+  }
+  
+  # 6) Airports XY in meters
   a_start <- sf::st_coordinates(airport_start)[1, ]
-  a_end   <- sf::st_coordinates(airport_end)[1, ]
+  a_end   <- sf::st_coordinates(airport_end)[1,  ]
   
   list(
-    ids = lines_m$id,
-    line_len = line_len,
+    ids      = lines_m$id,
+    line_len = len_m,
     Ax = Ax, Ay = Ay, Bx = Bx, By = By,
     ax = a_start["X"], ay = a_start["Y"],   # departure
     bx = a_end["X"],   by = a_end["Y"]      # arrival
@@ -665,6 +724,26 @@ build_flight_manifest <- function(dat, plan, speed_knots, dep_label = "DEP", arr
   do.call(rbind, manifest)
 }
 
+# Clean lines for optimizer: keep valid LINESTRINGs with positive length (>= 1 m)
+clean_lines_for_optimizer <- function(lines_sf) {
+  stopifnot(inherits(lines_sf, "sf"))
+  # In case Z/M crept in, drop them; keep safe types; make valid
+  lines_sf <- sf::st_zm(lines_sf, drop = TRUE, what = "ZM")
+  lines_sf <- sf::st_make_valid(lines_sf)
+  lines_sf <- suppressWarnings(sf::st_collection_extract(lines_sf, "LINESTRING"))
+  lines_sf <- lines_sf[!sf::st_is_empty(lines_sf), , drop = FALSE]
+  if (nrow(lines_sf) == 0) return(lines_sf)
+  # Compute length in a local metric CRS and drop ~0-length pieces
+  lines_ll <- sf::st_transform(lines_sf, 4326)
+  bb <- sf::st_bbox(lines_ll)
+  mid_lon <- as.numeric((bb["xmin"] + bb["xmax"]) / 2)
+  mid_lat <- as.numeric((bb["ymin"] + bb["ymax"]) / 2)
+  zone    <- floor((mid_lon + 180) / 6) + 1
+  crs_m   <- if (mid_lat >= 0) paste0("EPSG:", 32600 + zone) else paste0("EPSG:", 32700 + zone)
+  len_m   <- as.numeric(sf::st_length(sf::st_transform(lines_sf, crs_m)))
+  lines_sf[len_m >= 1, , drop = FALSE]  # keep >= 1 m
+}
+
 # ------------------------------ SINGLE-BASE (supports different arrival) ------------------------------
 run_transect_optimizer_single <- function(transects_sf,
                                           air_sf,
@@ -679,7 +758,16 @@ run_transect_optimizer_single <- function(transects_sf,
                                           terre_crop = NULL,
                                           xlim_terre = NULL,
                                           ylim_terre = NULL,
-                                          verbose = TRUE) {
+                                          verbose = TRUE) 
+{
+  
+  
+  # ---- NEW: clean the input transects right here ----
+  transects_sf <- clean_lines_for_optimizer(transects_sf)
+  if (nrow(transects_sf) == 0) stop(
+    "No usable transect line coordinates found after cleaning. ",
+    "Increase transect length or reduce clipping."
+  )
   
   stopifnot(inherits(transects_sf, "sf"), inherits(air_sf, "sf"))
   transects_sf <- ensure_id(transects_sf)
@@ -893,11 +981,50 @@ run_transect_optimizer_multi <- function(transects_sf,
                                          start_airport_code = NULL,
                                          end_airport_code   = NULL) {
   
+  # ---- NEW: clean the input transects right here ----
+  transects_sf <- clean_lines_for_optimizer(transects_sf)
+  if (nrow(transects_sf) == 0) stop(
+    "No usable transect line coordinates found after cleaning. ",
+    "Increase transect length or reduce clipping."
+  )
+  
   candidate_mode <- match.arg(candidate_mode)
   # Candidate set
   cand_air <- select_candidate_airports(air_sf, transects_sf,
                                         mode = candidate_mode, k = candidate_k, codes = candidate_codes)
+  
+  # --- NEW: make sure typed start/end (if any) are INCLUDED in candidate set (even if far) ---
+  force_codes <- unique(na.omit(c(start_airport_code, end_airport_code)))
+  if (length(force_codes) > 0) {
+    force_idx <- integer(0)
+    for (q in force_codes) {
+      if (!nzchar(q)) next
+      key <- toupper(gsub("\\s+","", trimws(as.character(q))))
+      idx <- integer(0)
+      # search in full air_sf
+      if ("ident" %in% names(air_sf)) {
+        v <- toupper(gsub("\\s+","", trimws(as.character(air_sf$ident))))
+        idx <- c(idx, which(v == key))
+      }
+      for (cn in intersect(c("icao_code","gps_code","icao","iata","iata_code","local_code","local","code"), names(air_sf))) {
+        v <- toupper(gsub("\\s+","", trimws(as.character(air_sf[[cn]]))))
+        idx <- c(idx, which(v == key))
+      }
+      idx <- unique(idx)
+      if (length(idx) > 0) force_idx <- c(force_idx, idx[1])
+    }
+    if (length(force_idx) > 0) {
+      cand_air <- suppressWarnings(dplyr::bind_rows(
+        cand_air,
+        air_sf[unique(force_idx), , drop = FALSE]
+      )) |>
+        dplyr::distinct(ident, .keep_all = TRUE)  # de-dup by ident (or pick a stable key)
+    }
+  }
+  
   if (nrow(cand_air) == 0) stop("No candidate airports available for multi-base.")
+  
+  
   
   # Metric CRS for planning
   crs_m <- crs_m_from_bbox(transects_sf)

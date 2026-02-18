@@ -68,38 +68,49 @@ make_transects_ll <- function(anchor_lonlat, n = 10, len_km = 20, sp_km = 2,
 }
 
 # Plot preview: full terre context, bbox outline, and transects
+# Plot preview: terre base, bbox outline, transects, airports, municipalities, and optional AOI
 plot_transect_preview <- function(bb_ll, terre, pt_landmark_ll, tran_ll,
                                   air_sf = NULL, muni_sf = NULL,
+                                  aoi_ll = NULL,                # <--- NEW: AOI in EPSG:4326 (optional)
                                   show_full_terre = TRUE) {
+  
   bb_ll <- validate_bbox(bb_ll)
   
-  # Force numeric bbox limits
+  # Numeric bbox limits (prevents ggplot from auto-expanding)
   xlim <- c(as.numeric(bb_ll[["xmin"]]), as.numeric(bb_ll[["xmax"]]))
   ylim <- c(as.numeric(bb_ll[["ymin"]]), as.numeric(bb_ll[["ymax"]]))
   
-  # bbox polygon overlay
+  # bbox polygon overlay (4326)
   bb_poly <- sf::st_as_sfc(bb_ll) |> sf::st_set_crs(4326)
   
   # transform layers to lon/lat for consistent preview
   terre_ll <- sf::st_transform(terre, 4326)
-  tran_ll  <- sf::st_transform(tran_ll,  4326)
+  tran_ll  <- sf::st_transform(tran_ll, 4326)
   
   # draw only cropped terre for speed OR full terre if requested
   terre_draw <- if (show_full_terre) terre_ll else sf::st_crop(terre_ll, sf::st_bbox(bb_poly))
   
   p <- ggplot2::ggplot() +
+    # base land
     ggplot2::geom_sf(data = terre_draw, fill = "grey97", color = "grey85", linewidth = 0.15) +
+    # AOI outline (if provided)
+    { if (!is.null(aoi_ll)) ggplot2::geom_sf(data = aoi_ll, fill = NA, color = "black", linewidth = 0.7) } +
+    # bbox outline
     ggplot2::geom_sf(data = sf::st_sf(geometry = bb_poly), fill = NA, color = "magenta", linewidth = 1) +
+    # transects + labels
     ggplot2::geom_sf(data = tran_ll, color = "red", linewidth = 1) +
     ggplot2::geom_sf_text(data = tran_ll, ggplot2::aes(label = id), color = "red4", size = 3,
                           check_overlap = TRUE, show.legend = FALSE) +
+    # landmark point (optional)
     { if (!is.null(pt_landmark_ll)) ggplot2::geom_sf(data = sf::st_transform(pt_landmark_ll, 4326),
                                                      color = "blue", size = 3) } +
-    # Optional overlays (points)
-    { if (!is.null(air_sf)  && nrow(air_sf)  > 0) ggplot2::geom_sf(data = sf::st_transform(air_sf,  4326),
-                                                                   color = "blue", size = 1.1) } +
-    { if (!is.null(muni_sf) && nrow(muni_sf) > 0) ggplot2::geom_sf(data = sf::st_transform(muni_sf, 4326),
-                                                                   color = "red",  size = 1.1) } +
+    # airports (optional)
+    { if (!is.null(air_sf) && nrow(air_sf) > 0)
+      ggplot2::geom_sf(data = sf::st_transform(air_sf, 4326), color = "blue", size = 1.1) } +
+    # municipalities (optional)
+    { if (!is.null(muni_sf) && nrow(muni_sf) > 0)
+      ggplot2::geom_sf(data = sf::st_transform(muni_sf, 4326), color = "red", size = 1.1) } +
+    # lock the view to bbox
     ggplot2::coord_sf(crs = sf::st_crs(4326), xlim = xlim, ylim = ylim, expand = FALSE) +
     ggplot2::theme_minimal() +
     ggplot2::labs(title = sprintf("Transect preview — BBox: xmin=%.4f ymin=%.4f xmax=%.4f ymax=%.4f",
@@ -109,12 +120,15 @@ plot_transect_preview <- function(bb_ll, terre, pt_landmark_ll, tran_ll,
 }
 
 # Interactive editor for transects
+
 refine_transects <- function(bb_ll, terre, pt_landmark_ll,
                              air_sf = NULL, muni_sf = NULL,
                              n = 10, len_km = 20, sp_km = 2, brg_deg = 90,
                              anchor_lonlat = NULL,
                              clip_to_bbox = TRUE,
-                             show_full_terre = TRUE) {
+                             show_full_terre = TRUE,
+                             aoi_ll = NULL)
+                             {
   
   bb_ll <- validate_bbox(bb_ll)
   
@@ -144,9 +158,12 @@ refine_transects <- function(bb_ll, terre, pt_landmark_ll,
     cat("                                 e.g., move east 20\n")
     cat("  clip on|off                -> clip transects to bbox\n\n")
     
+    
     plot_transect_preview(bb_ll, terre, pt_landmark_ll, tran_ll,
                           air_sf = air_sf, muni_sf = muni_sf,
+                          aoi_ll = aoi_ll,                  # <--- pass AOI (shows outline if present)
                           show_full_terre = show_full_terre)
+    
     
     ans  <- trimws(get_input_safe("Transect choice: ", "ok"))
     ans2 <- tolower(ans)

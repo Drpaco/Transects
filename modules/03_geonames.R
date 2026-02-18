@@ -12,13 +12,36 @@ geonames_search <- function(q, province = NULL, num = 20, lang = "en") {
 
 choose_geoname <- function(pts_sf, n_show = 12) {
   if (nrow(pts_sf) == 0) stop("No results returned. Try another term.")
-  cols <- intersect(names(pts_sf), c("name","concise","province","latitude","longitude","id","key"))
-  if (length(cols) == 0) cols <- names(pts_sf)[1:min(8, ncol(pts_sf))]
-  print(pts_sf[1:min(n_show, nrow(pts_sf)), cols])
   
-  idx <- as.integer(get_input_safe(sprintf("Select row (1..%d): ", min(n_show, nrow(pts_sf))), "1"))
-  if (is.na(idx) || idx < 1 || idx > min(n_show, nrow(pts_sf))) stop("Invalid selection.")
-  pts_sf[idx, ]
+  # Columns to display
+  cols <- intersect(names(pts_sf), c("name","concise","province","latitude","longitude","id","key"))
+  if (length(cols) == 0) {
+    cols <- names(pts_sf)[1:min(8, ncol(pts_sf))]
+  }
+  
+  # ---- Print ALL rows with row numbers ----
+  cat("\nAvailable landmarks:\n")
+  for (i in seq_len(nrow(pts_sf))) {
+    row <- pts_sf[i, cols, drop = FALSE]
+    vals <- sapply(row[1, cols, drop = TRUE], as.character)
+    
+    cat(sprintf("[%2d] ", i))
+    for (j in seq_along(cols)) {
+      cat(sprintf("%s=%s  ", cols[j], vals[j]))
+    }
+    cat("\n")
+  }
+  
+  # ---- Ask for selection ----
+  idx <- as.integer(
+    get_input_safe(sprintf("Select row (1..%d): ", nrow(pts_sf)), "1")
+  )
+  
+  if (is.na(idx) || idx < 1 || idx > nrow(pts_sf)) {
+    stop("Invalid selection.")
+  }
+  
+  pts_sf[idx, , drop = FALSE]
 }
 
 geonames_bbox_paged <- function(bb_ll, province = "24", concise = "CITY", theme = NULL,

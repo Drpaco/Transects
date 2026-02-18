@@ -124,9 +124,16 @@ build_routes_sf_per_trip_airports <- function(lines_sf, plan, crs_m, target_crs,
   lines_m <- sf::st_transform(ensure_id(lines_sf), crs_m)
   
   get_line_xy <- function(id) {
-    geom <- lines_m$geometry[which(lines_m$id == id)][[1]]
+    # make sure types match
+    ids_vec <- as.character(lines_m$id)
+    idx <- which(ids_vec == as.character(id))
+    if (length(idx) == 0) {
+      stop(sprintf("Line id '%s' not found in optimizer lines set. Check subsetting/IDs.", as.character(id)))
+    }
+    geom <- lines_m$geometry[[idx[1]]]
     sf::st_coordinates(geom)[, c("X","Y"), drop = FALSE]
   }
+  
   maybe_reverse <- function(xy, reverse = FALSE) if (reverse) xy[nrow(xy):1, , drop = FALSE] else xy
   seg_xy <- function(x1,y1,x2,y2) matrix(c(x1,y1,x2,y2), ncol=2, byrow=TRUE)
   
@@ -184,9 +191,16 @@ build_manifest_with_airports <- function(lines_sf, plan, crs_m, speed_knots, tri
   
   # endpoints A/B in meters for each line id
   get_line_xy <- function(id) {
-    geom <- lines_m$geometry[which(lines_m$id == id)][[1]]
+    # make sure types match
+    ids_vec <- as.character(lines_m$id)
+    idx <- which(ids_vec == as.character(id))
+    if (length(idx) == 0) {
+      stop(sprintf("Line id '%s' not found in optimizer lines set. Check subsetting/IDs.", as.character(id)))
+    }
+    geom <- lines_m$geometry[[idx[1]]]
     sf::st_coordinates(geom)[, c("X","Y"), drop = FALSE]
   }
+  
   end_xy   <- function(xy, end_is_A) if (end_is_A) xy[1, ] else xy[nrow(xy), ]
   start_xy_for_dir <- function(xy, end_is_A) if (end_is_A) xy[nrow(xy), ] else xy[1, ]
   
@@ -314,24 +328,26 @@ prep_lines <- function(lines_sf, airport_start_sf, crs_m, airport_end_sf = NULL)
   }
   
   # 3) Drop ~0-length pieces (use >= 1 meter)
-  len_m <- as.numeric(sf::st_length(lines_m))
-  keep  <- is.finite(len_m) & (len_m >= 1)
+  len_all <- as.numeric(sf::st_length(lines_m))
+  keep    <- is.finite(len_all) & (len_all >= 1)
   lines_m <- lines_m[keep, , drop = FALSE]
-  len_m   <- len_m[keep]
+  len_m   <- len_all[keep]
   if (nrow(lines_m) == 0) {
     stop("No usable transect line coordinates found (degenerate geometries).")
   }
   
-  # 4) Give each retained piece its own id (we're planning per usable segment)
-  lines_m$id <- seq_len(nrow(lines_m))
+  # 4) Preserve existing id if present; only add if missing (and normalize to character)
+  if (!("id" %in% names(lines_m))) {
+    lines_m$id <- seq_len(nrow(lines_m))
+  }
+  lines_m$id <- as.character(lines_m$id)
   
   # 5) Extract endpoints A/B safely for each piece
   Ax <- Ay <- Bx <- By <- numeric(nrow(lines_m))
   for (i in seq_len(nrow(lines_m))) {
     coords <- sf::st_coordinates(lines_m[i, ])
-    # For safety, if multiple parts slipped through, just take first/last row
-    first <- coords[1, c("X", "Y")]
-    last  <- coords[nrow(coords), c("X", "Y")]
+    first  <- coords[1, c("X","Y")]
+    last   <- coords[nrow(coords), c("X","Y")]
     Ax[i] <- first[["X"]]; Ay[i] <- first[["Y"]]
     Bx[i] <- last[["X"]];  By[i] <- last[["Y"]]
   }
@@ -341,14 +357,13 @@ prep_lines <- function(lines_sf, airport_start_sf, crs_m, airport_end_sf = NULL)
   a_end   <- sf::st_coordinates(airport_end)[1,  ]
   
   list(
-    ids      = lines_m$id,
+    ids      = as.character(lines_m$id),
     line_len = len_m,
     Ax = Ax, Ay = Ay, Bx = Bx, By = By,
     ax = a_start["X"], ay = a_start["Y"],   # departure
     bx = a_end["X"],   by = a_end["Y"]      # arrival
   )
 }
-
 # ------------------------------
 # Core optimization logic
 # ------------------------------
@@ -576,9 +591,15 @@ build_routes_sf <- function(lines_sf, airport_start_sf, plan, crs_m, target_crs,
   ap_end_m   <- if (is.null(airport_end_sf)) ap_start_m else sf::st_transform(airport_end_sf, crs_m)
   
   get_line_xy <- function(id) {
-    geom <- lines_m$geometry[which(lines_m$id == id)][[1]]
+    ids_vec <- as.character(lines_m$id)
+    idx <- which(ids_vec == as.character(id))
+    if (length(idx) == 0) {
+      stop(sprintf("Line id '%s' not found in optimizer lines set. Check subsetting/IDs.", as.character(id)))
+    }
+    geom <- lines_m$geometry[[idx[1]]]
     sf::st_coordinates(geom)[, c("X","Y"), drop = FALSE]
   }
+  
   maybe_reverse <- function(xy, reverse = FALSE) if (reverse) xy[nrow(xy):1, , drop = FALSE] else xy
   seg_xy <- function(x1,y1,x2,y2) matrix(c(x1,y1,x2,y2), ncol=2, byrow=TRUE)
   

@@ -285,62 +285,142 @@ if (has_aoi) {
 }
 
 # ----------------------------
-# STEP 3: Transects (interactive)
+# STEP 2A: Optional: load pre-existing transects (shapefile)
 # ----------------------------
-transects_ll <- refine_transects(
-  bb_ll = bb_final,
-  terre = terre,
-  pt_landmark_ll = pt,
-  air_sf = air_sf,
-  muni_sf = muni_sf,
-  n = 10,
-  len_km = 10,
-  sp_km = 1,
-  brg_deg = 90,
-  clip_to_bbox = TRUE,
-  show_full_terre = FALSE,            # crop terre to bbox during preview
-  aoi_ll = if (has_aoi) aoi_ll else NULL
-)
-transects_sf <- sf::st_transform(transects_ll, terre_crs)
+use_existing <- get_input_safe("Use existing transects shapefile? (y/n): ", "n")
 
-# If AOI is provided, clip transects to AOI polygon (post design)
-if (has_aoi) {
-  tr_before    <- nrow(transects_sf)
-  transects_sf <- clip_transects_to_aoi(transects_sf, aoi_terre)  # helper from modules/02_aoi_support.R
-  if (nrow(transects_sf) == 0) {
-    warning("All transects were outside AOI after clipping.")
-  } else if (nrow(transects_sf) < tr_before) {
-    message("Transects clipped to AOI: ", tr_before, " -> ", nrow(transects_sf))
+transects_external <- NULL
+use_external <- FALSE
+
+if (tolower(trimws(use_existing)) == "y") {
+  shp_path <- get_input_safe("Path to transects shapefile (.shp/.gpkg): ", "")
+  shp_path <- trimws(shp_path)
+  
+  if (!file.exists(shp_path)) stop("File not found: ", shp_path)
+  
+  message("Loading external transects: ", shp_path)
+  tr_raw <- suppressWarnings(sf::st_read(shp_path, quiet = TRUE))
+  tr_raw <- sf::st_make_valid(tr_raw)
+  
+  # Project to NAD83 (terre_crs) for consistency
+  tr_raw <- sf::st_transform(tr_raw, terre_crs)
+  
+  # ---- Use the SAME cleaning you use inside the optimizer ----
+  transects_external <- clean_lines_for_optimizer(tr_raw)
+  
+  if (nrow(transects_external) == 0) {
+    stop("No usable transects found after cleaning your external shapefile.")
   }
+  
+  message("Loaded ", nrow(transects_external), " transects from file.")
+  use_external <- TRUE
 }
 
-# ---- Normalize transect geometries after any clipping ----
-# Make sure we only keep LINESTRING/MULTILINESTRING and drop empties
-if (inherits(transects_sf, "sf")) {
-  # Drop empty
+# ----------------------------
+# STEP 3: Transects (interactive OR external from STEP 2A)
+# ----------------------------
+if (isTRUE(use_external)) {
+  # ----------------------------------------
+  # (B) Use the transects loaded and cleaned in STEP 2A
+  # ----------------------------------------
+  transects_sf <- transects_external  # already NAD83/terre_crs and cleaned
+  
+  # Ensure IDs exist (should already be present—this is just a guard)
+  if (!("id" %in% names(transects_sf))) {
+    transects_sf$id <- seq_len(nrow(transects_sf))
+  }
+  
+  # Labels
+  tran_labels_sf <- transect_labels_at_east_end(transects_sf, bb_final)
+  tran_labels_sf$label <- paste0("T", tran_labels_sf$id)
+  
+  cat("Loaded external transects: ", nrow(transects_sf), "\n")
+  print(unique(sf::st_geometry_type(transects_sf)))
+  
+} else {
+  # ----------------------------------------
+  # (A) ORIGINAL INTERACTIVE WORKFLOW
+  # ----------------------------------------
+  transects_ll <- refine_transects(
+    bb_ll = bb_final,
+    terre = terre,
+    pt_landmark_ll = pt,
+    air_sf = air_sf,
+    muni_sf = muni_sf,
+    n = 10,
+    len_km = 10,
+    sp_km = 1,
+    brg_deg = 90,
+    clip_to_bbox = TRUE,
+    show_full_terre = FALSE,
+    aoi_ll = if (has_aoi) aoi_ll else NULL
+  )
+  transects_sf <- sf::st_transform(transects_ll, terre_crs)
+  
+  # If AOI is provided, clip transects to AOI polygon (post design)
+  if (has_aoi) {
+    tr_before    <- nrow(transects_sf)
+    transects_sf <- clip_transects_to_aoi(transects_sf, aoi_terre)
+    if (nrow(transects_sf) == 0) {
+      warning("All transects were outside AOI after clipping.")
+    } else if (nrow(transects_sf) < tr_before) {
+      message("Transects clipped to AOI: ", tr_before, " -> ", nrow(transects_sf))
+    }
+  }
+  
+  # ---- Normalize transect geometries after clipping ----
   transects_sf <- transects_sf[!sf::st_is_empty(transects_sf), , drop = FALSE]
-  
-  # Extract LINESTRING parts from collections (if any)
-  # This is robust when st_intersection() produced collections
   transects_sf <- suppressWarnings(sf::st_collection_extract(transects_sf, "LINESTRING"))
-  
-  # If still mixed, cast MULTILINESTRING -> LINESTRING parts
-  # (This will split multi-lines into individual line pieces; IDs are preserved)
-  if (!all(sf::st_geometry_type(transects_sf) %in% c("LINESTRING", "MULTILINESTRING"))) {
+  if (!all(sf::st_geometry_type(transects_sf) %in% c("LINESTRING","MULTILINESTRING"))) {
     transects_sf <- suppressWarnings(sf::st_cast(transects_sf, "LINESTRING"))
   }
-  
-  # Final guard: keep only non-zero length lines
-  len_m <- as.numeric(sf::st_length(sf::st_transform(transects_sf, sf::st_crs(transects_sf))))
+  # Drop zero-length (compute length in a quick local metric CRS)
+  derive_crs_m <- function(x_ll_4269) {
+    x_ll <- sf::st_transform(x_ll_4269, 4326)
+    bb <- sf::st_bbox(x_ll)
+    mid_lon <- as.numeric((bb["xmin"] + bb["xmax"]) / 2)
+    mid_lat <- as.numeric((bb["ymin"] + bb["ymax"]) / 2)
+    zone <- floor((mid_lon + 180) / 6) + 1
+    if (mid_lat >= 0) paste0("EPSG:", 32600 + zone) else paste0("EPSG:", 32700 + zone)
+  }
+  crs_m_chk <- derive_crs_m(transects_sf)
+  len_m <- as.numeric(sf::st_length(sf::st_transform(transects_sf, crs_m_chk)))
   transects_sf <- transects_sf[len_m > 0, , drop = FALSE]
+  
+  cat("transects_sf normalized to: "); print(unique(sf::st_geometry_type(transects_sf)))
+  
+  # Labels
+  tran_labels_sf <- transect_labels_at_east_end(transects_sf, bb_final)
+  tran_labels_sf$label <- paste0("T", tran_labels_sf$id)
 }
 
-# Optional: print to confirm
-cat("transects_sf normalized to: "); print(unique(sf::st_geometry_type(transects_sf)))
-
-# Labels at east end (recompute after potential AOI clip)
-tran_labels_sf <- transect_labels_at_east_end(transects_sf, bb_final)
-tran_labels_sf$label <- paste0("T", tran_labels_sf$id)
+# ----------------------------
+# STEP 3B: Optional: subset “remaining” transects
+# ----------------------------
+subset_q <- get_input_safe("Subset transects before optimization? (y/n): ", "n")
+if (tolower(trimws(subset_q)) == "y") {
+  # guarantee id exists and is character for stable matching
+  if (!("id" %in% names(transects_sf))) {
+    transects_sf$id <- seq_len(nrow(transects_sf))
+  }
+  transects_sf$id <- as.character(transects_sf$id)
+  
+  cat("\nYou can remove transects by their ID. Current IDs:\n")
+  print(transects_sf$id)
+  
+  rm_ids <- trimws(get_input_safe("Enter IDs to remove separated by commas (e.g. 3,4,10): ", ""))
+  if (nzchar(rm_ids)) {
+    rm_vec <- unlist(strsplit(rm_ids, "\\s*,\\s*"))
+    transects_sf <- transects_sf[!(as.character(transects_sf$id) %in% rm_vec), , drop = FALSE]
+  }
+  
+  if (nrow(transects_sf) == 0) stop("No transects remain after subsetting.")
+  message("Subsetting complete. Remaining: ", nrow(transects_sf))
+  
+  # Rebuild labels after subsetting
+  tran_labels_sf <- transect_labels_at_east_end(transects_sf, bb_final)
+  tran_labels_sf$label <- paste0("T", tran_labels_sf$id)
+}
 
 # ----------------------------
 # STEP 4: Crop + graticule + limits (only recompute when NOT in AOI mode)

@@ -180,7 +180,18 @@ if (has_aoi) {
   span_km_y <- (as.numeric(bb_m["ymax"]) - as.numeric(bb_m["ymin"])) / 1000
   
   # 7) Build NAD83 bbox/labels and all map artifacts in NAD83
-  bb_final <- sf::st_bbox(aoi_ll)   # NAD83 degrees
+  bb_initial <- sf::st_bbox(aoi_ll)  # starting from AOI extent
+  cat("\nAOI detected. You can refine the bbox (zoom/pan) before creating transects.\n")
+  bb_final <- refine_bbox_from_bbox(
+    bb_ll = bb_initial,
+    terre = terre,                 # your land layer
+    aoi_ll = aoi_ll,               # to show AOI outline during refining (optional)
+    initial_zoom_factor = 1.0,     # 1.0 = no auto-zoom
+    pan_step_km = 10,
+    zoom_factor = 1.5,
+    show_full_terre = FALSE
+  )
+  
   bb_txt <- sprintf(
     "AOI (NAD83): lon=%.4f..%.4f  lat=%.4f..%.4f  (~%.1f km x %.1f km)",
     bb_final["xmin"], bb_final["xmax"], bb_final["ymin"], bb_final["ymax"],

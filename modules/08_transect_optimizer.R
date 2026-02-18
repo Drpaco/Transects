@@ -779,7 +779,11 @@ run_transect_optimizer_single <- function(transects_sf,
                                           terre_crop = NULL,
                                           xlim_terre = NULL,
                                           ylim_terre = NULL,
-                                          verbose = TRUE) 
+                                          verbose = TRUE,
+                                          # NEW: overlays for quick PNG
+                                          air_sf_plot = NULL,
+                                          muni_sf_plot = NULL,
+                                          aoi_sf_plot = NULL) 
 {
   
   
@@ -866,10 +870,15 @@ run_transect_optimizer_single <- function(transects_sf,
   # ---------- Optional quick PNG ----------
   if (isTRUE(make_plot)) {
     plot_crs <- terre_crs
-    lines_p   <- sf::st_transform(transects_sf, plot_crs)
-    routes_p  <- sf::st_transform(routes_sf,  plot_crs)
-    ap_start_p<- sf::st_transform(ap_start_ll, plot_crs)
-    ap_end_p  <- sf::st_transform(ap_end_ll,   plot_crs)
+    lines_p    <- sf::st_transform(transects_sf, plot_crs)
+    routes_p   <- sf::st_transform(routes_sf,  plot_crs)
+    ap_start_p <- sf::st_transform(ap_start_ll, plot_crs)
+    ap_end_p   <- sf::st_transform(ap_end_ll,   plot_crs)
+    
+    # NEW overlays transformed to plot CRS (if provided)
+    air_p  <- if (!is.null(air_sf_plot)  && nrow(air_sf_plot)  > 0) sf::st_transform(air_sf_plot,  plot_crs) else NULL
+    muni_p <- if (!is.null(muni_sf_plot) && nrow(muni_sf_plot) > 0) sf::st_transform(muni_sf_plot, plot_crs) else NULL
+    aoi_p  <- if (!is.null(aoi_sf_plot)) sf::st_transform(aoi_sf_plot, plot_crs) else NULL
     
     arrows_mid <- rbind(
       make_route_arrows(routes_sf, plot_crs, crs_m, 0.18, 0.22),
@@ -888,6 +897,7 @@ run_transect_optimizer_single <- function(transects_sf,
     gg <- ggplot2::ggplot() +
       { if (!is.null(terre_crop)) ggplot2::geom_sf(data = sf::st_transform(terre_crop, plot_crs),
                                                    fill = "cornsilk", color = "grey60") } +
+      { if (!is.null(aoi_p))      ggplot2::geom_sf(data = aoi_p, fill = NA, color = "black", linewidth = 0.7) } +
       ggplot2::geom_sf(data = routes_p, ggplot2::aes(color = factor(trip)), linewidth = 1.1) +
       ggplot2::geom_segment(
         data = arrows_mid,
@@ -896,6 +906,9 @@ run_transect_optimizer_single <- function(transects_sf,
         linewidth = 0.9
       ) +
       ggplot2::geom_sf(data = lines_p, color = "red", linewidth = 0.7) +
+      # NEW overlays
+      { if (!is.null(air_p)  && nrow(air_p)  > 0) ggplot2::geom_sf(data = air_p,  color = "blue", size = 1.6) } +
+      { if (!is.null(muni_p) && nrow(muni_p) > 0) ggplot2::geom_sf(data = muni_p, color = "red",  size = 1.2) } +
       ggplot2::geom_sf(data = ap_start_p, color = "black", size = 2.5) +
       ggplot2::geom_sf_text(data = ap_start_p, ggplot2::aes(label = "DEP"), nudge_x = 0.01, size = 3) +
       { if (!all(sf::st_equals(ap_start_p, ap_end_p)[[1]])) ggplot2::geom_sf(data = ap_end_p, color = "black", size = 2.5) } +
@@ -1000,7 +1013,11 @@ run_transect_optimizer_multi <- function(transects_sf,
                                          verbose = TRUE,
                                          # NEW: anchors passed from wrapper
                                          start_airport_code = NULL,
-                                         end_airport_code   = NULL) {
+                                         end_airport_code   = NULL,
+                                         # NEW: overlays for quick PNG
+                                         air_sf_plot = NULL,
+                                         muni_sf_plot = NULL,
+                                         aoi_sf_plot = NULL) {
   
   # ---- NEW: clean the input transects right here ----
   transects_sf <- clean_lines_for_optimizer(transects_sf)
@@ -1202,20 +1219,32 @@ run_transect_optimizer_multi <- function(transects_sf,
       plot_crs <- terre_crs
       lines_p  <- sf::st_transform(transects_sf, plot_crs)
       routes_p <- sf::st_transform(routes_sf,  plot_crs)
+      
+      # NEW overlays (optional)
+      air_p  <- if (!is.null(air_sf_plot)  && nrow(air_sf_plot)  > 0) sf::st_transform(air_sf_plot,  plot_crs) else NULL
+      muni_p <- if (!is.null(muni_sf_plot) && nrow(muni_sf_plot) > 0) sf::st_transform(muni_sf_plot, plot_crs) else NULL
+      aoi_p  <- if (!is.null(aoi_sf_plot)) sf::st_transform(aoi_sf_plot, plot_crs) else NULL
+      
       geoms <- c(sf::st_geometry(lines_p), sf::st_geometry(routes_p))
       bb <- sf::st_bbox(geoms); pad <- 0.08
       xpad <- as.numeric(bb["xmax"] - bb["xmin"]) * pad
       ypad <- as.numeric(bb["ymax"] - bb["ymin"]) * pad
       xlim <- if (!is.null(xlim_terre)) xlim_terre else c(bb["xmin"] - xpad, bb["xmax"] + xpad)
       ylim <- if (!is.null(ylim_terre)) ylim_terre else c(bb["ymin"] - ypad, bb["ymax"] + ypad)
+      
       gg <- ggplot2::ggplot() +
         { if (!is.null(terre_crop)) ggplot2::geom_sf(data = sf::st_transform(terre_crop, plot_crs),
                                                      fill = "cornsilk", color = "grey60") } +
+        { if (!is.null(aoi_p))      ggplot2::geom_sf(data = aoi_p, fill = NA, color = "black", linewidth = 0.7) } +
         ggplot2::geom_sf(data = routes_p, ggplot2::aes(color = factor(trip)), linewidth = 1.1) +
         ggplot2::geom_sf(data = lines_p, color = "red", linewidth = 0.7) +
+        # NEW overlays
+        { if (!is.null(air_p)  && nrow(air_p)  > 0) ggplot2::geom_sf(data = air_p,  color = "blue", size = 1.6) } +
+        { if (!is.null(muni_p) && nrow(muni_p) > 0) ggplot2::geom_sf(data = muni_p, color = "red",  size = 1.2) } +
         ggplot2::coord_sf(xlim = xlim, ylim = ylim, expand = FALSE) +
         ggplot2::theme_minimal() +
         ggplot2::guides(color = ggplot2::guide_legend(title = "Trip"))
+      
       png_path <- file.path(export_dir, paste0(out_basename, "_flight_routes.png"))
       ggplot2::ggsave(filename = png_path, plot = gg, width = 12, height = 10, dpi = 300)
     }
@@ -1252,7 +1281,11 @@ run_transect_optimizer <- function(transects_sf,
                                    end_airport_code = NULL,
                                    multi_airports = NULL,       # NULL | "auto" | character vector
                                    multi_k = 2,
-                                   verbose = TRUE) {
+                                   verbose = TRUE,
+                                   # NEW: overlays to forward to quick PNGs
+                                   air_sf_plot = NULL,
+                                   muni_sf_plot = NULL,
+                                   aoi_sf_plot = NULL) {
   
   if (is.null(multi_airports)) {
     return(
@@ -1270,7 +1303,11 @@ run_transect_optimizer <- function(transects_sf,
         terre_crop  = terre_crop,
         xlim_terre  = xlim_terre,
         ylim_terre  = ylim_terre,
-        verbose     = verbose
+        verbose     = verbose,
+        # NEW
+        air_sf_plot  = air_sf_plot,
+        muni_sf_plot = muni_sf_plot,
+        aoi_sf_plot  = aoi_sf_plot
       )
     )
   }
@@ -1294,7 +1331,11 @@ run_transect_optimizer <- function(transects_sf,
     ylim_terre  = ylim_terre,
     verbose     = verbose,
     start_airport_code = airport_code,
-    end_airport_code   = end_airport_code
+    end_airport_code   = end_airport_code,
+    # NEW
+    air_sf_plot  = air_sf_plot,
+    muni_sf_plot = muni_sf_plot,
+    aoi_sf_plot  = aoi_sf_plot
   )
 }
 

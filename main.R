@@ -204,17 +204,22 @@ if (has_aoi) {
     terre <- sf::st_transform(terre, 4269)
   }
   aoi_terre <- aoi_ll
-  bb_terre  <- sf::st_bbox(aoi_terre)    # NAD83 degrees
+
+  # bb_final is refined in EPSG:4326
+  bb_terre   <- sf::st_bbox(sf::st_transform(sf::st_as_sfc(bb_final), terre_crs))
   terre_crop <- sf::st_crop(terre, bb_terre)
   
+  # Optional padding (5%)
   pad_x <- as.numeric(bb_terre["xmax"] - bb_terre["xmin"]) * 0.05
   pad_y <- as.numeric(bb_terre["ymax"] - bb_terre["ymin"]) * 0.05
+  
+  # FINAL limits for all maps (used by plot_final_map and optimizer quick PNGs)
   xlim_terre <- c(as.numeric(bb_terre["xmin"]) - pad_x, as.numeric(bb_terre["xmax"]) + pad_x)
   ylim_terre <- c(as.numeric(bb_terre["ymin"]) - pad_y, as.numeric(bb_terre["ymax"]) + pad_y)
   
-  # Graticule built in 4269, kept in 4269
+  # Rebuild graticule for the refined bbox (in 4269)
   grat_final <- sf::st_graticule(bbox = bb_final, crs = sf::st_crs(4269), ndx = 8, ndy = 8)
-  grat_final <- sf::st_sf(geometry = grat_final)  # already in 4269
+  grat_final <- sf::st_sf(geometry = grat_final)
   
   message("AOI mode: ON (Landmark skipped). Map/display locked to NAD83 (EPSG:4269).")
 } else {
@@ -245,6 +250,7 @@ if (!has_aoi) {
   
   bb_terre   <- sf::st_bbox(sf::st_transform(sf::st_as_sfc(bb_final), terre_crs))
   terre_crop <- sf::st_crop(terre, bb_terre)
+  
   xlim_terre <- c(as.numeric(bb_terre["xmin"]), as.numeric(bb_terre["xmax"]))
   ylim_terre <- c(as.numeric(bb_terre["ymin"]), as.numeric(bb_terre["ymax"]))
   
@@ -255,44 +261,77 @@ if (!has_aoi) {
 # ----------------------------
 # STEP 1: Airports
 # ----------------------------
-
 air_sf_all <- load_airports(AIRPORTS_CSV)
-# Use filtered airports for the main map (as you already do)
+
+# Filter to the *refined* bbox bb_final
 air_sf <- bbox_filter_points(air_sf_all, bb_final)
 air_sf <- make_airport_labels(air_sf)
-air_sf <- st_transform(air_sf, terre_crs)
+air_sf <- sf::st_transform(air_sf, terre_crs)
+cat(sprintf("Airports after bbox filter: %d\n", nrow(air_sf)))
 
+# Ask if we should also limit to AOI (+ buffer)
+apply_aoi_buffer_pts <- FALSE
 if (has_aoi) {
-  crs_m  <- "EPSG:3857"
-  aoi_buf <- sf::st_transform(aoi_terre, crs_m) |> sf::st_buffer(25000) |> sf::st_transform(terre_crs)
-  air_sf  <- air_sf[sf::st_intersects(air_sf, aoi_buf, sparse = FALSE), , drop = FALSE]
+  ans_buf <- tolower(trimws(get_input_safe(
+    "Limit airports to AOI + buffer? (y/n) [y]: ", "y"
+  )))
+  apply_aoi_buffer_pts <- (ans_buf == "y" || ans_buf == "yes" || ans_buf == "")
 }
 
-cat("\n--- DEBUG AIRPORTS ---\n")
-print( AIRPORTS_CSV )
-print( names(air_sf_all) )
-# Show the key fields if they exist (will print NAs for missing columns, which is fine)
-print( head(air_sf_all[, c("ident","icao","iata","code","airport_label","name")], 10) )
-
-cat("Exact match ident == 'CYGP':\n")
-print( subset(air_sf_all, ident == "CYGP") )
-
-cat("Partial search for 'CYGP' in ident:\n")
-print( air_sf_all[grepl("CYGP", air_sf_all$ident, ignore.case = TRUE), c("ident","name")] )
-
-cat("--- END DEBUG AIRPORTS ---\n")
+if (has_aoi && apply_aoi_buffer_pts) {
+  # Option A: Constant buffer (25 km)
+  # buf_m <- 25000
+  
+  # Option B (recommended): scale buffer to bbox size (here ~8% of bbox diagonal)
+  bb_len_m <- function(bb_ll) {
+    # derive a local UTM from bbox center and measure diagonal
+    mid_lon <- as.numeric((bb_ll["xmin"] + bb_ll["xmax"]) / 2)
+    mid_lat <- as.numeric((bb_ll["ymin"] + bb_ll["ymax"]) / 2)
+    zone <- floor((mid_lon + 180) / 6) + 1
+    crs_m <- if (mid_lat >= 0) paste0("EPSG:", 32600 + zone) else paste0("EPSG:", 32700 + zone)
+    p1 <- sf::st_sfc(sf::st_point(c(bb_ll["xmin"], bb_ll["ymin"])), crs = 4326) |> sf::st_transform(crs_m)
+    p2 <- sf::st_sfc(sf::st_point(c(bb_ll["xmax"], bb_ll["ymax"])), crs = 4326) |> sf::st_transform(crs_m)
+    as.numeric(sf::st_distance(p1, p2))
+  }
+  diag_m <- bb_len_m(bb_final)
+  buf_m  <- max(15000, 0.08 * diag_m)  # at least 15 km, else ~8% of bbox diagonal
+  
+  # Build buffer in metric CRS then back to map CRS
+  crs_m  <- "EPSG:3857"
+  aoi_buf <- sf::st_transform(aoi_terre, crs_m) |> sf::st_buffer(buf_m) |> sf::st_transform(terre_crs)
+  
+  # Intersect test (not st_within to keep points on the boundary)
+  keep_air <- sf::st_intersects(air_sf, aoi_buf, sparse = FALSE)
+  air_sf   <- air_sf[keep_air, , drop = FALSE]
+  cat(sprintf("Airports after AOI buffer (~%.0f km): %d\n", buf_m/1000, nrow(air_sf)))
+}
 
 # ----------------------------
-# STEP 2: Municipalities (NRCan GeoNames)
+# STEP 2: Municipalities (GeoNames)
 # ----------------------------
 muni_raw <- geonames_bbox_paged(bb_final, province = province_code, concise = "CITY")
 muni_ll  <- to_points_safe(muni_raw, bb_final) |> bbox_filter_points(bb_final)
 muni_sf  <- sf::st_transform(muni_ll, terre_crs)
+cat(sprintf("Municipalities after bbox filter: %d\n", nrow(muni_sf)))
 
-if (has_aoi) {
+if (has_aoi && apply_aoi_buffer_pts) {
+  # Reuse the same buffer distance computed above (or recompute)
+  if (!exists("buf_m")) {
+    mid_lon <- as.numeric((bb_final["xmin"] + bb_final["xmax"]) / 2)
+    mid_lat <- as.numeric((bb_final["ymin"] + bb_final["ymax"]) / 2)
+    zone <- floor((mid_lon + 180) / 6) + 1
+    crs_m <- if (mid_lat >= 0) paste0("EPSG:", 32600 + zone) else paste0("EPSG:", 32700 + zone)
+    p1 <- sf::st_sfc(sf::st_point(c(bb_final["xmin"], bb_final["ymin"])), crs = 4326) |> sf::st_transform(crs_m)
+    p2 <- sf::st_sfc(sf::st_point(c(bb_final["xmax"], bb_final["ymax"])), crs = 4326) |> sf::st_transform(crs_m)
+    diag_m <- as.numeric(sf::st_distance(p1, p2))
+    buf_m  <- max(15000, 0.08 * diag_m)
+  }
   crs_m  <- "EPSG:3857"
-  aoi_buf <- sf::st_transform(aoi_terre, crs_m) |> sf::st_buffer(25000) |> sf::st_transform(terre_crs)
-  muni_sf <- muni_sf[sf::st_intersects(muni_sf, aoi_buf, sparse = FALSE), , drop = FALSE]
+  aoi_buf <- sf::st_transform(aoi_terre, crs_m) |> sf::st_buffer(buf_m) |> sf::st_transform(terre_crs)
+  
+  keep_muni <- sf::st_intersects(muni_sf, aoi_buf, sparse = FALSE)
+  muni_sf   <- muni_sf[keep_muni, , drop = FALSE]
+  cat(sprintf("Municipalities after AOI buffer (~%.0f km): %d\n", buf_m/1000, nrow(muni_sf)))
 }
 
 # ----------------------------
@@ -459,6 +498,19 @@ OUT_DIR_TRANSECTS <- normalizePath(OUT_DIR_TRANSECTS, winslash = "/", mustWork =
 OUT_DIR_FLIGHTS   <- normalizePath(OUT_DIR_FLIGHTS,   winslash = "/", mustWork = FALSE)
 out_png_transects <- file.path(OUT_DIR_TRANSECTS, paste0(out_name, "_transects.png"))
 
+# If limits are NA, derive from terre_crop, otherwise keep the refined ones
+if (any(!is.finite(as.numeric(xlim_terre))) || any(!is.finite(as.numeric(ylim_terre)))) {
+  warning("Invalid x/y limits; deriving from terre_crop bbox.")
+  bb <- sf::st_bbox(terre_crop)
+  xlim_terre <- c(as.numeric(bb["xmin"]), as.numeric(bb["xmax"]))
+  ylim_terre <- c(as.numeric(bb["ymin"]), as.numeric(bb["ymax"]))
+}
+
+
+cat("USING LIMITS: xlim=", paste(xlim_terre, collapse=","), 
+    " ylim=", paste(ylim_terre, collapse=","), "\n")
+cat("air_sf n=", nrow(air_sf), " muni_sf n=", nrow(muni_sf), "\n")
+
 # ----------------------------
 # STEP 5: Plot (base transects map) – single call
 # ----------------------------
@@ -573,8 +625,8 @@ if (startsWith(opt_ans, "y")) {
   
   message("Running optimizer...")
   opt_res <- run_transect_optimizer(
-    transects_sf = transects_opt,   # <--- use the cleaned set
-    air_sf       = air_all_for_opt, # full airports (not bbox-filtered)
+    transects_sf = transects_opt,
+    air_sf       = air_all_for_opt,
     terre_crs    = terre_crs,
     airport_code = ap_start,
     end_airport_code = ap_end,
@@ -588,7 +640,10 @@ if (startsWith(opt_ans, "y")) {
     terre_crop   = terre_crop,
     xlim_terre   = xlim_terre,
     ylim_terre   = ylim_terre,
-    verbose      = TRUE
+    # overlays used only for optimizer quick PNG:
+    air_sf_plot  = air_sf,                     # filtered after refined bbox
+    muni_sf_plot = muni_sf,                    # filtered after refined bbox
+    aoi_sf_plot  = if (has_aoi) aoi_terre else NULL
   )
   
   gg_routes <- plot_final_map(

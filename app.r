@@ -365,7 +365,11 @@ landmark_polygon_ll_or_null <- function(x) {
 
 # --- UI ------------------------------------------------------------------------
 ui <- navbarPage(
-  title = "Transects Planner",
+  
+  title = tagList(
+    span(strong("Transect Planner")),
+    tags$small(style="margin-left:6px; color:#6c757d;", em("by François Bolduc, Canadian Wildlife Service, Quebec Region"))
+  ),
   id = "main_tabs",
   tabPanel("Area & BBox",
            fluidRow(
@@ -527,7 +531,163 @@ ui <- navbarPage(
                     DTOutput("manifest_table")
              )
            )
+  ),
+  tabPanel("Guide",
+           fluidRow(
+             column(
+               12,
+               # --- Scoped styles for readability ---
+               tags$head(tags$style(HTML("
+        #guide h3 { margin-top: 0.6rem; }
+        #guide h4 { margin-top: 1.2rem; }
+        #guide .callout { padding: 10px 12px; border-left: 4px solid #2C3E50; background: #f7f9fb; margin: 12px 0; }
+        #guide code, #guide samp { background: #f1f3f5; padding: 0 4px; border-radius: 3px; }
+        #guide details { margin: 10px 0 6px 0; }
+        #guide summary { font-weight: 700; cursor: pointer; }
+        #guide li { margin: 4px 0; }
+        #guide .step { font-weight: 700; }
+        #guide .ok { color: #2c7a7b; }
+        #guide .warn { color: #b7791f; }
+        #guide .err { color: #c53030; }
+        #guide .kbd { padding:0 5px; border:1px solid #ccc; border-bottom-width:2px; border-radius:3px; background:#fff; }
+      "))),
+               div(
+                 id = "guide",
+                 
+                 h3("How to use the Transect Planner"),
+                 # --- Note (goes right after h3(...)) ---
+                 div(class = "callout",
+                     p(
+                       "The Transect Planner builds ", strong("parallel transects only"), 
+                       ", with a focus on eastern Canada. Use it to select your study area; load municipalities and airports; build or upload transects; subset transects for partial surveys; and generate an optimized route to survey the selected transects, based on your chosen start and end airports."
+                     )                 ),
+                 div(class = "callout",
+                     p(strong("Quick start")),
+                     tags$ol(
+                       tags$li("Open ", strong("Area & BBox"), " → upload an AOI ", em("(or)"),
+                               " search a landmark → set your bounding box."),
+                       tags$li("Switch to ", strong("Points"), " → set the buffer (0–250 km) and click ",
+                               strong("Apply Filter"), " to load airports and municipalities."),
+                       tags$li("Open ", strong("Transects"), " → either upload existing transects ",
+                               em("or"), " set parameters and ", strong("Build/Refresh Transects"), "."),
+                       tags$li("Drag the ", em("anchor"), " to move transects if needed (Step 3), then ",
+                               strong("Save Transects"), " (Step 4)."),
+                       tags$li("Go to ", strong("Optimize"), " → set flight settings → ", strong("Run Optimizer"),
+                               " → view colored routes, legend, and download outputs.")
+                     )
+                 ),
+                 
+                 h4("Tabs overview"),
+                 
+                 tags$details(open = "open",
+                              tags$summary("1) Area & BBox"),
+                              tags$ul(
+                                tags$li(strong("Basemap"), ": choose a background map from the dropdown."),
+                                tags$li(strong("AOI shapefile/GeoPackage"), ": upload a polygon AOI. If the AOI has no CRS, a small prompt asks you to enter an EPSG (e.g., 32198 for Québec Lambert)."),
+                                tags$li(strong("Landmark search"), ": search by name and (optionally) province code; pick a result to seed the BBox."),
+                                tags$li(strong("Refine BBox"), ": pan/zoom or draw a rectangle, then click ", code("Use current map view as BBox"), "."),
+                                tags$li(strong("What you see on the map"),
+                                        tags$ul(
+                                          tags$li("AOI outline (black), if provided"),
+                                          tags$li("Bounding box (magenta)")
+                                        )
+                                ),
+                                tags$li(strong("Reset"), ": ", code("Start over (reset all)"), " clears state and maps.")
+                              )
+                 ),
+                 
+                 tags$details(open = "open",
+                              tags$summary("2) Points (Airports & Municipalities)"),
+                              tags$ul(
+                                tags$li(strong("Filter region"), ": controlled by the toggle ",
+                                        code("Limit to AOI + buffer"),
+                                        " and the buffer distance slider (", strong("0–250 km"), "). ",
+                                        "When ON, the app uses ", em("AOI + buffer"), "; when OFF, it uses ", em("BBox + buffer"), "."),
+                                tags$li(strong("Apply Filter"), ": loads airports and municipalities, then draws them with always-on labels."),
+                                tags$li(strong("Filter outline"), ": a thin grey outline of the current filter region is visible on this tab only."),
+                                tags$li(strong("Counts"), ": the panel shows how many airports and municipalities were retained."),
+                                tags$li(strong("Reset"), ": ", code("Reset points"), " clears airports/municipalities from the map.")
+                              ),
+                              div(class="callout",
+                                  p(strong("Offline tip (municipalities)")),
+                                  p("If the GeoGratis GeoNames service is temporarily unavailable, the app can use an ",
+                                    "offline CSV cache of municipalities (same points and labels). If enabled by your admin, ",
+                                    "the first successful fetch writes:"),
+                                  tags$ul(
+                                    tags$li("Cache path: ", code(textOutput("guide_cache_path", inline = TRUE)))
+                                  ),
+                                  p("Future runs read this CSV and filter to your region—no web call needed. ",
+                                    em("If you don’t see the CSV, it simply means the cache wasn’t enabled or saved yet."))
+                              )
+                 ),
+                 
+                 tags$details(open = "open",
+                   tags$summary("3) Transects (5 steps)"),
+                   p("This tab is organized as five numbered, collapsible steps. Steps 3–5 are hidden by default."),
+                   tags$ol(
+                     tags$li(span(class="step", "1) Use existing transects (optional)"), ": upload a ",
+                             code(".gpkg"), " or zipped shapefile. The map draws them immediately."),
+                     tags$li(span(class="step", "2) Or build transects"), ": set ",
+                             code("Number of lines"), ", ", code("Length (km)"), ", ", code("Spacing (km)"),
+                             ", ", code("Bearing (deg)"), "; click ", strong("Build/Refresh Transects"),
+                             ". The anchor defaults to BBox center; click the map to set it elsewhere."),
+                     tags$li(span(class="step", "3) Move transects"), ": toggle ",
+                             code("Enable drag-to-move (anchor)"),
+                             " to show a draggable anchor:",
+                             tags$ul(
+                               tags$li(code("Rebuild lines when dragging"), ": when checked, transects are recomputed using the current parameters; when unchecked, the current set is translated."),
+                               tags$li(code("Reset anchor"), ": send the anchor back to BBox center.")
+                             )),
+                     tags$li(span(class="step", "4) Save transects"), ": download ",
+                             code("GPKG"), " or a ", code("Shapefile ZIP"), "."),
+                     tags$li(span(class="step", "5) Subset remaining transects"), ": select rows in the table to remove individual lines from the current set.")
+                   ),
+                   tags$ul(
+                     tags$li(strong("Clipping to AOI"), ": if an AOI is present, newly built (and rebuild‑on‑drag) transects are clipped at the AOI boundary."),
+                     tags$li(strong("Labels"), ": each transect shows an always‑visible ID label near its midpoint."),
+                     tags$li(strong("Reset"), ": ", code("Reset transects"), " clears transects and the anchor.")
+                   )
+                 ),
+                 
+                 tags$details(open = "open",
+                   tags$summary("4) Optimize"),
+                   tags$ul(
+                     tags$li(strong("Settings"), ": choose start/end airports (or leave end blank to return to start), multi‑airports, speed (knots), endurance (hours), and output base name."),
+                     tags$li(strong("Run Optimizer"), ": shows a progress dialog; when finished, routes are drawn on the map in ", em("distinct colors per trip"), " with a legend."),
+                     tags$li(strong("Downloads"), ": ",
+                             code("Routes (GPKG, Shapefile ZIP)"), ", ",
+                             code("Trips CSV"), ", ", code("Flight Manifest CSV"), "."),
+                     tags$li(strong("Reset"), ": ", code("Reset optimizer outputs"), " clears routes and tables.")
+                   )
+                 ),
+                 
+                 tags$details(open = "open",
+                   tags$summary("Troubleshooting & FAQs"),
+                   tags$ul(
+                     tags$li(strong("AOI upload closes the app? "), span(class="err","(rare)"),
+                             " Your AOI may be corrupt or missing critical files. The app now guards against hard read errors and shows a notification instead—try zipping the entire shapefile set ",
+                             em("(.shp, .shx, .dbf, .prj, .cpg)"), " and upload the ", code(".zip"), "."),
+                     tags$li(strong("AOI has no CRS (.prj missing)"), ": a small CRS prompt appears; enter the correct EPSG (e.g., ", code("32198"), " for Québec Lambert) and the app will proceed and zoom to the AOI."),
+                     tags$li(strong("Municipalities show 0"), ": the filter region may be too tight (try turning OFF ",
+                             code("Limit to AOI + buffer"), " and increase buffer). If the GeoGratis service is down, ",
+                             "municipalities won’t load unless you have the offline CSV cache."),
+                     tags$li(strong("I don’t see labels"), ": zoom in a bit; also check the layer control—labels are separate overlay groups that can be toggled."),
+                     tags$li(strong("No map on a tab"), ": each map renders immediately; if you still see a blank widget, switch tabs once or resize the window—rendering then triggers and layers appear.")
+                   )
+                 ),
+                 
+                 tags$details(open = "open",
+                   tags$summary("Map tips"),
+                   tags$ul(
+                     tags$li("Use the layer control (top‑right) to toggle AOI, BBox, Airports, Municipalities, Labels, Transects, Routes, etc."),
+                     tags$li("The scale bar (bottom‑left) shows distances in km."),
+                     tags$li("Mouse wheel = zoom; drag = pan; click in Transects tab sets the anchor when move mode is enabled.")
+                   )
+                 )               )
+             )
+           )
   )
+  
 )
 
 # --- SERVER --------------------------------------------------------------------

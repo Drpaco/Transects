@@ -2,6 +2,12 @@
 # Adaptive project launcher
 # ============================
 
+install.packages(c(
+  "shiny", "shinyWidgets", "shinycssloaders",
+  "leaflet", "leaflet.extras", "DT",
+  "sf", "dplyr", "ggplot2", "readr"
+))
+
 get_script_dir <- function() {
   cmd <- commandArgs(trailingOnly = FALSE)
   file_arg <- grep("^--file=", cmd, value = TRUE)

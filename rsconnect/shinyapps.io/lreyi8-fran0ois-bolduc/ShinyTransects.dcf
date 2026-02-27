@@ -1,0 +1,13 @@
+name: ShinyTransects
+title: ShinyTransects
+username: lreyi8-fran0ois-bolduc
+account: lreyi8-fran0ois-bolduc
+server: shinyapps.io
+hostUrl: https://api.shinyapps.io/v1
+appId: 16775152
+bundleId: 11638521
+url: https://lreyi8-fran0ois-bolduc.shinyapps.io/ShinyTransects/
+version: 1
+asMultiple: FALSE
+asStatic: FALSE
+ignoredFiles: diagnose_app.R|main.R|OpenSHPexample.R|Pixelator/.RData|Pixelator/camera_catalog_user.csv|Pixelator/gsd_ranges_single.R|Pixelator/Run_pixelator.R|Pixelator/testCouvertureMars2026.xlsx|TransectBuilderCommander.R|transectDesignerModule_backup.R

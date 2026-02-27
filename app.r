@@ -23,6 +23,15 @@ library(zip)
 # Accept up to 200 MB uploads (adjust as needed)
 options(shiny.maxRequestSize = 200 * 1024^2)
 
+# ---- Cache location (local vs shinyapps.io) --
+is_shinyapps <- nzchar(Sys.getenv("SHINY_PORT"))
+MUNI_CACHE_FILE <- if (is_shinyapps) {
+  file.path(tempdir(), "municipalities_cache.csv")
+} else {
+  file.path("data", "cache", "municipalities_cache.csv")
+}
+dir.create(dirname(MUNI_CACHE_FILE), recursive = TRUE, showWarnings = FALSE)
+
 # --- Runtime options (no debugger halt unless explicitly enabled) -------------
 if (interactive() && isTRUE(getOption("shiny.debug", FALSE))) {
   options(shiny.fullstacktrace = TRUE, shiny.error = browser)
@@ -120,12 +129,10 @@ load_muni_cache_sf <- function() {
   sfobj
 }
 
-# Offline-first fetch for municipalities:
-# - If cache exists: read and return sf filtered to region
-# - Else: call your existing geonames_bbox_paged(), convert to points, save CSV, return sf
+# Offline-first with robust online fallback + ALWAYS save once on success
 get_muni_points_offline_first <- function(query_bbox_ll, region_terre, terre_crs,
-                                          province = NULL, concise = "CITY") {
-  # 1) Try cache
+                                          province = NULL, concise = NULL, theme = "POPULATED_PLACE") {
+  # 1) Try cache first
   cache_ll <- load_muni_cache_sf()
   if (!is.null(cache_ll)) {
     cache_terre <- try(sf::st_transform(cache_ll, terre_crs), silent = TRUE)
@@ -133,42 +140,63 @@ get_muni_points_offline_first <- function(query_bbox_ll, region_terre, terre_crs
       keep <- try(sf::st_intersects(cache_terre, region_terre, sparse = FALSE)[, 1], silent = TRUE)
       if (!inherits(keep, "try-error")) {
         n_total <- nrow(cache_terre); n_keep <- sum(keep)
-        cat("DEBUG[get_muni] cache path used: total =", n_total, " in region =", n_keep, "\n")
-        if (n_keep == 0) {
-          showNotification(
-            sprintf("Municipalities cache has %d records but 0 in current region. Increase buffer or toggle AOI limit.", n_total),
-            type = "warning", duration = 7
-          )
-        }
+        cat("DEBUG[get_muni] cache used: total =", n_total, " in region =", n_keep, "\n")
         return(cache_terre[keep, , drop = FALSE])
       }
     }
   }
   
-  # 2) Cache missing -> go online once for *current* region; save
-  cat("DEBUG[get_muni] cache missing or unusable; trying online fetch once...\n")
-  muni_raw <- try(geonames_bbox_paged(query_bbox_ll, province = province, concise = concise),
-                  silent = TRUE)
-  if (inherits(muni_raw, "try-error") || is.null(muni_raw)) {
-    cat("DEBUG[get_muni] online fetch failed; will return NULL\n")
-    return(NULL)
+  # 2) Primary online fetch (theme, broader than CITY only)
+  cat("DEBUG[get_muni] cache missing/unusable; trying online (theme)\n")
+  muni_raw <- try(
+    geonames_bbox_paged(query_bbox_ll, province = province, concise = concise, theme = theme, num = 1000),
+    silent = TRUE
+  )
+  rows_primary <- if (!inherits(muni_raw, "try-error") && !is.null(muni_raw)) nrow(muni_raw) else 0
+  
+  # 3) Fallback: union of concise classes if primary is empty
+  if (rows_primary == 0) {
+    cat("DEBUG[get_muni] primary returned 0; trying concise union with theme=NULL\n")
+    concise_set <- c("CITY","TOWN","VILLAGE","HAMLET","LOCALITY")
+    lst <- lapply(concise_set, function(cz)
+      geonames_bbox_paged(
+        bb_ll    = query_bbox_ll,
+        province = NULL,
+        concise  = cz,
+        theme    = NULL,
+        num      = 1000
+      )
+    )
+    muni_raw <- suppressWarnings(do.call(rbind, Filter(Negate(is.null), lst)))
+    if (is.null(muni_raw)) muni_raw <- sf::st_sf(geometry = sf::st_sfc(), crs = 4326)
+    cat("DEBUG[get_muni] union rows =", nrow(muni_raw), "\n")
   }
   
-  muni_ll <- try(to_points_safe(muni_raw, query_bbox_ll), silent = TRUE)
-  if (inherits(muni_ll, "try-error") || is.null(muni_ll) || nrow(muni_ll) == 0) {
+  # 4) Convert to POINTS in 4326
+  if (is.null(muni_raw) || nrow(muni_raw) == 0) {
+    cat("DEBUG[get_muni] no municipalities after fallback; returning NULL\n")
+    return(NULL)
+  }
+  muni_ll <- to_points_safe(muni_raw, query_bbox_ll)
+  if (is.null(muni_ll) || nrow(muni_ll) == 0) {
     cat("DEBUG[get_muni] to_points_safe produced no rows; returning NULL\n")
     return(NULL)
   }
   
-  # Save cache for offline reuse
-  try(save_muni_cache(muni_ll), silent = TRUE)
+  # 5) SAVE the cache once (POINTS in 4326)
+  tryCatch(
+    { save_muni_cache(muni_ll) },   # writes data/cache/municipalities_cache.csv (locally)
+    error = function(e) cat("DEBUG[save_muni_cache] failed:", conditionMessage(e), "\n")
+  )
   
+  # 6) Transform to terre_crs and intersect with filter region
   muni_terre <- try(sf::st_transform(muni_ll, terre_crs), silent = TRUE)
   if (inherits(muni_terre, "try-error")) return(NULL)
   keep <- try(sf::st_intersects(muni_terre, region_terre, sparse = FALSE)[, 1], silent = TRUE)
-  if (inherits(keep, "try-error")) return(muni_terre)
+  if (inherits(keep, "try-error")) return(muni_terre[0, , drop = FALSE])
   muni_terre[keep, , drop = FALSE]
 }
+
 
 # cat("DEBUG[muni] n_airports =", if (!is.null(rv$air_sf)) nrow(rv$air_sf) else 0,
 #     " n_municipalities =", if (!is.null(rv$muni_sf)) nrow(rv$muni_sf) else 0, "\n")
@@ -367,7 +395,7 @@ landmark_polygon_ll_or_null <- function(x) {
 ui <- navbarPage(
   
   title = tagList(
-    span(strong("Transect Planner")),
+    span("Transect Planner"),
     tags$small(style="margin-left:6px; color:#6c757d;", em("by François Bolduc, Canadian Wildlife Service, Quebec Region"))
   ),
   id = "main_tabs",
@@ -389,7 +417,7 @@ ui <- navbarPage(
                     ),
                     conditionalPanel("input.area_mode == 'lm'",
                                      textInput("lm_query", "Landmark search (e.g., Perce, Gaspe)", "Perce"),
-                                     textInput("lm_province", "Province code (e.g., 24=QC, blank=Any)", "24"),
+                                     textInput("lm_province", "Province code (e.g., 24=QC, blank=Any)", ""),
                                      sliderInput("lm_buf_km", "Initial bbox buffer (km)", min = 0, max = 250, value = 10, step = 10),
                                      actionButton("lm_search", "Search Landmark")
                     ),
@@ -564,7 +592,7 @@ ui <- navbarPage(
                  div(class = "callout",
                      p(strong("Quick start")),
                      tags$ol(
-                       tags$li("Open ", strong("Area & BBox"), " → upload an AOI ", em("(or)"),
+                       tags$li("Open ", strong("Area & BBox"), " → upload an AOI (Area of Interest)", em("(or)"),
                                " search a landmark → set your bounding box."),
                        tags$li("Switch to ", strong("Points"), " → set the buffer (0–250 km) and click ",
                                strong("Apply Filter"), " to load airports and municipalities."),
@@ -951,7 +979,7 @@ server <- function(input, output, session) {
   
   output$lm_table <- renderDT({
     req(rv$lm_results)
-    cols <- intersect(names(rv$lm_results), c("name","concise","province","latitude","longitude","id","key"))
+    cols <- intersect(names(rv$lm_results), c("name","concise",'theme',"province","latitude","longitude","id","key"))
     dat <- as.data.frame(sf::st_drop_geometry(rv$lm_results[, cols, drop = FALSE]))
     datatable(dat, selection = "single", options = list(pageLength = 10))
   })
@@ -1214,6 +1242,9 @@ server <- function(input, output, session) {
       region <- region_rx()
       query_bbox_ll <- safe_query_bbox_ll(region, bb_final_rx())
       
+      cat(sprintf("DEBUG[bbox_ll] west=%.6f south=%.6f east=%.6f north=%.6f\n",
+                  query_bbox_ll["xmin"], query_bbox_ll["ymin"], query_bbox_ll["xmax"], query_bbox_ll["ymax"]))
+      
       # ---- Airports: transform & intersect with the same region ----
       incProgress(0.35, detail = "Filtering airports")
       air_terre <- tryCatch(sf::st_transform(rv$air_all, terre_crs), error = function(e) NULL)
@@ -1229,30 +1260,121 @@ server <- function(input, output, session) {
         rv$air_sf <- tryCatch(make_airport_labels(rv$air_sf), error = function(e) rv$air_sf)
       }
       
-      # ---- Municipalities: OFFLINE-FIRST (CSV cache) -------------------------------
-      incProgress(0.65, detail = "Preparing municipalities (offline-first)")
-      rv$muni_sf <- tryCatch(
-        get_muni_points_offline_first(
-          query_bbox_ll = query_bbox_ll,     # from your safe_query_bbox_ll(region, bb)
-          region_terre  = region,            # same region used for airports filtering
-          terre_crs     = terre_crs,
-          province      = NULL,
-          concise       = "CITY"
-        ),
-        error = function(e) {
-          showNotification(paste("Municipality fetch (offline-first) failed:", conditionMessage(e)),
-                           type = "error", duration = 8)
-          NULL
-        }
-        # # After: rv$muni_sf <- get_muni_points_offline_first(...)
-        # if (file.exists(MUNI_CACHE_FILE)) {
-        #   info <- file.info(MUNI_CACHE_FILE)
-        #   cat("DEBUG[muni-cache] exists, size(bytes) =", info$size, "\n")
-        # } else {
-        #   cat("DEBUG[muni-cache] does NOT exist\n")
-        # }
-        
+      # # ---- Municipalities: OFFLINE-FIRST (CSV cache) -------------------------------
+      # incProgress(0.65, detail = "Preparing municipalities (offline-first)")
+      # rv$muni_sf <- tryCatch(
+      #   get_muni_points_offline_first(
+      #     query_bbox_ll = query_bbox_ll,     # from your safe_query_bbox_ll(region, bb)
+      #     region_terre  = region,            # same region used for airports filtering
+      #     terre_crs     = terre_crs,
+      #     province      = NULL,
+      #     concise       = NULL,
+      #     theme    = "POPULATED_PLACE"
+      #   ),
+      #   error = function(e) {
+      #     showNotification(paste("Municipality fetch (offline-first) failed:", conditionMessage(e)),
+      #                      type = "error", duration = 8)
+      #     NULL
+      #   }
+      # )
+      # 
+      
+      # ---- Municipalities: DIAGNOSTIC (union of concise classes; online-only) ----
+      incProgress(0.65, detail = "Municipalities (diagnostic union)")
+      
+      # 1) Pull several concise classes and union (theme=NULL for this test)
+      concise_set <- c("CITY","TOWN","VILLAGE","HAMLET","LOCALITY")
+      lst <- lapply(concise_set, function(cz)
+        geonames_bbox_paged(
+          bb_ll    = query_bbox_ll,
+          province = NULL,
+          concise  = cz,
+          theme    = NULL,   # IMPORTANT: remove theme for the test
+          num      = 1000
+        )
       )
+      
+      # Keep only non-null pages
+      lst <- Filter(Negate(is.null), lst)
+      
+      # Safely row-bind sf pages (preserves geometry). If there are none, make an empty sf with a geometry column.
+      muni_raw <- if (length(lst)) {
+        suppressWarnings(do.call(rbind, lst))
+      } else {
+        sf::st_sf(geometry = sf::st_sfc(), crs = 4326)
+      }
+      
+      cat("DEBUG[test] union rows =", nrow(muni_raw), "\n")
+      
+      # 2) Convert to POINTS, transform to terre_crs, intersect with region
+      #    (Start with a valid empty sf so we never fail on assignment.)
+      rv$muni_sf <- sf::st_sf(geometry = sf::st_sfc(), crs = 4326)
+      
+      if (!is.null(muni_raw) && nrow(muni_raw) > 0) {
+        muni_ll <- to_points_safe(muni_raw, query_bbox_ll)  # returns POINT sf in 4326
+        if (!is.null(muni_ll) && nrow(muni_ll) > 0) {
+          muni_terre <- sf::st_transform(muni_ll, terre_crs)
+          keep <- try(sf::st_intersects(muni_terre, region, sparse = FALSE)[,1], silent = TRUE)
+          if (!inherits(keep, "try-error") && any(keep)) {
+            rv$muni_sf <- muni_terre[keep, , drop = FALSE]
+          } else {
+            rv$muni_sf <- muni_terre[0, , drop = FALSE]
+          }
+        }
+      }
+      
+      # Ensure a 'name' column exists for labels
+      if (!is.null(rv$muni_sf) && nrow(rv$muni_sf) > 0 && !("name" %in% names(rv$muni_sf))) {
+        cand <- c("GEONAME","NAME","title")
+        hit  <- intersect(cand, names(rv$muni_sf))
+        rv$muni_sf$name <- if (length(hit)) as.character(rv$muni_sf[[hit[1]]]) else ""
+      }
+      
+      cat("DEBUG[test] rv$muni_sf rows =", nrow(rv$muni_sf), "\n")
+      
+      
+      
+      
+      
+      cat("DEBUG[muni] rv$muni_sf rows = ", if (is.null(rv$muni_sf)) 0 else nrow(rv$muni_sf), "\n")
+      
+      if (file.exists(MUNI_CACHE_FILE)) {
+        info <- file.info(MUNI_CACHE_FILE)
+        cat("DEBUG[muni-cache] exists, size(bytes) =", info$size, "\n")
+      } else {
+        cat("DEBUG[muni-cache] does NOT exist\n")
+      }
+      
+      # --- ALWAYS save a cache copy when we have municipalities ---
+      if (!is.null(rv$muni_sf) && nrow(rv$muni_sf) > 0) {
+        # Ensure a 'name' column (for labels and for cache)
+        if (!("name" %in% names(rv$muni_sf))) {
+          cand <- c("GEONAME","NAME","title")
+          hit  <- intersect(cand, names(rv$muni_sf))
+          rv$muni_sf$name <- if (length(hit)) as.character(rv$muni_sf[[hit[1]]]) else ""
+        }
+        # Ensure a 'province' column (cache schema)
+        if (!("province" %in% names(rv$muni_sf))) {
+          rv$muni_sf$province <- ""
+        }
+        
+        # Save cache as POINTS in EPSG:4326 (the cache schema)
+        muni_ll_for_cache <- try(sf::st_transform(rv$muni_sf, 4326), silent = TRUE)
+        if (!inherits(muni_ll_for_cache, "try-error")) {
+          tryCatch(
+            {
+              save_muni_cache(muni_ll_for_cache)   # writes MUNI_CACHE_FILE
+              cat("DEBUG[cache-write] wrote file ->", normalizePath(MUNI_CACHE_FILE, mustWork = FALSE), "\n")
+              cat("DEBUG[cache-write] exists? ", file.exists(MUNI_CACHE_FILE), "\n")
+            },
+            error = function(e) {
+              cat("DEBUG[cache-write] failed:", conditionMessage(e), "\n")
+            }
+          )
+        } else {
+          cat("DEBUG[cache] transform to 4326 failed; no cache written\n")
+        }
+      }
       
       # ---- Redraw the Points map (proxy) + feedback ----
       redraw_points_map()

@@ -1,5 +1,3 @@
-# app.R
-
 needed <- c(
   "shiny","shinyWidgets","shinycssloaders","leaflet","leaflet.extras","DT",
   "sf","dplyr","ggplot2","readr","grid","zip"
@@ -506,7 +504,8 @@ ui <- navbarPage(
                           tags$summary("4) Save transects"),
                           br(),
                           downloadButton("dl_transects_gpkg", "Download Transects (GPKG)"),
-                          downloadButton("dl_transects_shp",  "Download Transects (Shapefile ZIP)")
+                          downloadButton("dl_transects_shp",  "Download Transects (Shapefile ZIP)"),
+                          downloadButton("dl_transects_kml",  "Download Transects (KML)")
                         ),
                         hr(),
                         
@@ -1746,6 +1745,18 @@ server <- function(input, output, session) {
       suppressWarnings(sf::st_write(rv$transects_sf, dsn = tmpdir, layer = layer,
                                     driver = "ESRI Shapefile", delete_layer = TRUE, quiet = TRUE))
       zip(zipfile = file, files = list.files(tmpdir, full.names = TRUE), mode = "cherry-pick")
+    }
+  )
+
+  output$dl_transects_kml <- downloadHandler(
+    filename = function() sprintf("%s_transects.kml", input$out_basename),
+    content = function(file) {
+      req(rv$transects_sf)
+      suppressWarnings(
+        sf::st_write(sf::st_transform(rv$transects_sf, 4326), dsn = file,
+                     layer = "transects", driver = "KML",
+                     delete_dsn = TRUE, quiet = TRUE)
+      )
     }
   )
   
